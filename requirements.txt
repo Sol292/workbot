@@ -1,0 +1,5 @@
+fastapi
+uvicorn[standard]
+python-telegram-bot[webhooks]
+pydantic-settings
+python-dotenv
