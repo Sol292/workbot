@@ -1,6 +1,7 @@
 import os
 from json import JSONDecodeError
 from datetime import datetime, timedelta
+import re
 import dateparser
 
 from fastapi import FastAPI, Request, HTTPException, Header
@@ -93,24 +94,17 @@ def ensure_user(update: Update):
     }
 
 def parse_when_ru(text: str) -> datetime | None:
-    """
-    Гибкий парсер: сегодня/завтра/послезавтра, «в 18:00», dd.mm HH:MM, просто HH:MM и т.д.
-    Предпочитает будущее время.
-    """
     now = datetime.now()
     text = (text or "").strip()
     if not text:
         return None
-    # Если пришло только "HH:MM" — попробуем сегодня, а если прошло — завтра
-    if len(text) in (4,5) and ":" in text and all(p.isdigit() for p in text.replace(":","").split()):
-        try:
-            hh, mm = text.split(":")
-            candidate = now.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
-            if candidate < now:
-                candidate += timedelta(days=1)
-            return candidate
-        except Exception:
-            pass
+    # простой HH:MM → сегодня/завтра
+    if re.fullmatch(r"\d{1,2}:\d{2}", text):
+        hh, mm = text.split(":")
+        candidate = now.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
+        if candidate < now:
+            candidate += timedelta(days=1)
+        return candidate
     dt = dateparser.parse(
         text,
         languages=["ru"],
@@ -123,7 +117,7 @@ def parse_when_ru(text: str) -> datetime | None:
     )
     return dt
 
-# ========= BASIC COMMANDS (и обработка текст-кнопок) =========
+# ========= BASIC =========
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ensure_user(update)
     await update.message.reply_text(
@@ -134,25 +128,6 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• {BTN_GO_ON}/{BTN_GO_OFF} — доступность",
         reply_markup=_main_menu_kb()
     )
-
-async def on_text_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Роутер для человеко-подписанных кнопок."""
-    text = (update.message.text or "").strip()
-    low = text.lower()
-    if low == BTN_NEWJOB.lower():
-        return await newjob_start(update, context)
-    if low == BTN_MYJOBS.lower():
-        return await list_myjobs(update, context)
-    if low == BTN_WORKMODE.lower():
-        return await cmd_workmode(update, context)
-    if low == BTN_GO_ON.lower():
-        return await go_on(update, context)
-    if low == BTN_GO_OFF.lower():
-        return await go_off(update, context)
-    if low == BTN_HELP.lower():
-        return await cmd_help(update, context)
-    # если не совпало — игнор
-    await update.message.reply_text("Нажми кнопку меню или введи команду.", reply_markup=_main_menu_kb())
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -228,11 +203,23 @@ async def newjob_pay(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return S_PHOTOS
 
 async def newjob_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (update.message.text or "").strip().lower() if update.message.text else ""
+    text = (update.message.text or "").strip().lower() if update.message and update.message.text else ""
     if text in (BTN_DONE.lower(), BTN_SKIP.lower()):
-        return await newjob_photos_done(update, context)
+        # идём к подтверждению
+        d = context.user_data
+        txt = (
+            "Проверь карточку задачи:\n\n"
+            f"• Категория: {d['category']}\n"
+            f"• Адрес: {d['address']}\n"
+            f"• Когда: {d['when']}\n"
+            f"• Бюджет: {d['pay']}\n\n"
+            "Отправить? (Да/Нет)"
+        )
+        await update.message.reply_text(txt)
+        return S_CONFIRM
+
     photos = context.user_data.get("photos", [])
-    if update.message.photo:
+    if update.message and update.message.photo:
         if len(photos) >= 3:
             await update.message.reply_text("Максимум 3 фото. Напиши 'Готово'."); return S_PHOTOS
         photos.append(update.message.photo[-1].file_id)
@@ -241,19 +228,6 @@ async def newjob_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(f"Отправь фото или напиши '{BTN_DONE}' / '{BTN_SKIP}'.")
     return S_PHOTOS
-
-async def newjob_photos_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    d = context.user_data
-    txt = (
-        "Проверь карточку задачи:\n\n"
-        f"• Категория: {d['category']}\n"
-        f"• Адрес: {d['address']}\n"
-        f"• Когда: {d['when']}\n"
-        f"• Бюджет: {d['pay']}\n\n"
-        "Отправить? (Да/Нет)"
-    )
-    await update.message.reply_text(txt)
-    return S_CONFIRM
 
 async def newjob_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if (update.message.text or "").strip().lower() != "да":
@@ -314,13 +288,12 @@ async def w_cats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if low == BTN_DONE.lower():
         if not context.user_data["cats"]:
             await update.message.reply_text("Выбери хотя бы одну категорию.", reply_markup=_categories_kb()); return W_CATS
-        # радиус
         rows = [[str(r) + " км" for r in RADIUS_CHOICES[:2]], [str(r) + " км" for r in RADIUS_CHOICES[2:]]]
         await update.message.reply_text("Выбери радиус работы:", reply_markup=ReplyKeyboardMarkup(rows, resize_keyboard=True))
         return W_RADIUS
     if text not in CATEGORIES:
         await update.message.reply_text("Выбирай кнопками или 'Готово'.", reply_markup=_categories_kb(context.user_data["cats"])); return W_CATS
-    # отметили категорию — добавляем и УБИРАЕМ её из клавиатуры
+    # добавляем категорию и убираем её из клавиатуры
     context.user_data["cats"].add(text)
     await update.message.reply_text("Добавлено: " + ", ".join(context.user_data["cats"]),
                                     reply_markup=_categories_kb(context.user_data["cats"]))
@@ -369,19 +342,12 @@ async def broadcast_job(job: dict):
     address_low = job["address"].lower()
     notified = 0
     for wid, w in WORKERS.items():
-        if not w["available"]:
-            continue
-        if cat not in w["cats"]:
-            continue
-        if w["city"].lower() not in address_low:
-            continue
+        if not w["available"]:    continue
+        if cat not in w["cats"]:  continue
+        if w["city"].lower() not in address_low:  continue
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("Откликнуться", callback_data=f"bid:{job['id']}")]])
-        text = (
-            f"Новая задача #{job['id']}\n"
-            f"{job['category']} • {job['when']}\n"
-            f"{job['address']}\n"
-            f"Бюджет: {job['pay']}"
-        )
+        text = (f"Новая задача #{job['id']}\n{job['category']} • {job['when']}\n"
+                f"{job['address']}\nБюджет: {job['pay']}")
         try:
             await tg_app.bot.send_message(chat_id=USERS.get(wid,{}).get("chat_id", wid), text=text, reply_markup=kb)
             notified += 1
@@ -397,15 +363,13 @@ async def cbq_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     data = q.data or ""
     if data.startswith("bid:"):
-        job_id = int(data.split(":")[1])
-        return await handle_bid(update, job_id)
+        job_id = int(data.split(":")[1]);  return await handle_bid(update, job_id)
     if data.startswith("pick:"):
-        _, job_id_s, worker_id_s = data.split(":")
-        return await handle_pick(update, int(job_id_s), int(worker_id_s))
+        _, job_id_s, worker_id_s = data.split(":");  return await handle_pick(update, int(job_id_s), int(worker_id_s))
 
-async def handle_bid(update: Update, context_job_id: int):
+async def handle_bid(update: Update, job_id: int):
     wid = update.effective_user.id
-    job = JOB_BY_ID.get(context_job_id)
+    job = JOB_BY_ID.get(job_id)
     if not job:
         return await update.callback_query.edit_message_text("Задача уже недоступна.")
     if wid not in WORKERS:
@@ -444,29 +408,24 @@ async def handle_pick(update: Update, job_id: int, worker_id: int):
     work_un = USERS.get(worker_id,{}).get("username", f"id{worker_id}")
     await update.callback_query.edit_message_text(f"Выбран исполнитель: {work_un} ✅")
     try:
-        await tg_app.bot.send_message(chat_id=USERS[worker_id]["chat_id"],
-                                      text=f"Тебя выбрали на задачу #{job_id}. Связь с заказчиком: {cust_un}")
+        await tg_app.bot.send_message(chat_id=USERS[worker_id]["chat_id"], text=f"Тебя выбрали на задачу #{job_id}. Связь с заказчиком: {cust_un}")
     except Exception: pass
     try:
-        await tg_app.bot.send_message(chat_id=USERS[cust_id]["chat_id"],
-                                      text=f"Контакты исполнителя по #{job_id}: {work_un}")
+        await tg_app.bot.send_message(chat_id=USERS[cust_id]["chat_id"], text=f"Контакты исполнителя по #{job_id}: {work_un}")
     except Exception: pass
 
 # ========= CONVERSATIONS =========
 conv_newjob = ConversationHandler(
     entry_points=[
         CommandHandler("newjob", newjob_start),
-        MessageHandler(filters.TEXT & ~filters.COMMAND, on_text_buttons),  # роутим подписи-кнопки
+        MessageHandler(filters.Regex(re.compile(rf"^{re.escape(BTN_NEWJOB)}$", re.IGNORECASE)), newjob_start),
     ],
     states={
         S_CAT:   [MessageHandler(filters.TEXT & ~filters.COMMAND, newjob_cat)],
         S_ADDR:  [MessageHandler(filters.TEXT & ~filters.COMMAND, newjob_addr)],
         S_WHEN:  [MessageHandler(filters.TEXT & ~filters.COMMAND, newjob_when)],
         S_PAY:   [MessageHandler(filters.TEXT & ~filters.COMMAND, newjob_pay)],
-        S_PHOTOS:[
-            MessageHandler(filters.PHOTO, newjob_photo),
-            MessageHandler(filters.TEXT & ~filters.COMMAND, newjob_photo),  # ловим "готово/пропустить" любым регистром
-        ],
+        S_PHOTOS:[MessageHandler(filters.ALL & ~filters.COMMAND, newjob_photo)],
         S_CONFIRM:[MessageHandler(filters.TEXT & ~filters.COMMAND, newjob_confirm)],
     },
     fallbacks=[CommandHandler("cancel", lambda u,c: u.message.reply_text("Отменено.", reply_markup=_main_menu_kb()))],
@@ -474,7 +433,10 @@ conv_newjob = ConversationHandler(
 )
 
 conv_worker = ConversationHandler(
-    entry_points=[CommandHandler("workmode", cmd_workmode)],
+    entry_points=[
+        CommandHandler("workmode", cmd_workmode),
+        MessageHandler(filters.Regex(re.compile(rf"^{re.escape(BTN_WORKMODE)}$", re.IGNORECASE)), cmd_workmode),
+    ],
     states={
         W_CITY:   [MessageHandler(filters.TEXT & ~filters.COMMAND, w_city)],
         W_CATS:   [MessageHandler(filters.TEXT & ~filters.COMMAND, w_cats)],
@@ -484,12 +446,22 @@ conv_worker = ConversationHandler(
     allow_reentry=True,
 )
 
-# Регистрируем хендлеры
+# Отдельные кнопки «доступен/недоступен», «мои задачи», «помощь»
+btn_myjobs = MessageHandler(filters.Regex(re.compile(rf"^{re.escape(BTN_MYJOBS)}$", re.IGNORECASE)), list_myjobs)
+btn_go_on  = MessageHandler(filters.Regex(re.compile(rf"^{re.escape(BTN_GO_ON)}$", re.IGNORECASE)), go_on)
+btn_go_off = MessageHandler(filters.Regex(re.compile(rf"^{re.escape(BTN_GO_OFF)}$", re.IGNORECASE)), go_off)
+btn_help   = MessageHandler(filters.Regex(re.compile(rf"^{re.escape(BTN_HELP)}$", re.IGNORECASE)), cmd_help)
+
+# Регистрируем
 tg_app.add_handler(CommandHandler("start", cmd_start))
 tg_app.add_handler(CommandHandler("help", cmd_help))
 tg_app.add_handler(CommandHandler("myjobs", list_myjobs))
 tg_app.add_handler(CommandHandler("go_on", go_on))
 tg_app.add_handler(CommandHandler("go_off", go_off))
+tg_app.add_handler(btn_myjobs)
+tg_app.add_handler(btn_go_on)
+tg_app.add_handler(btn_go_off)
+tg_app.add_handler(btn_help)
 tg_app.add_handler(conv_worker)
 tg_app.add_handler(conv_newjob)
 tg_app.add_handler(CallbackQueryHandler(cbq_handler))
@@ -540,7 +512,6 @@ async def api_create_job(request: Request, authorization: str | None = Header(de
         raise HTTPException(status_code=401, detail="bad api token")
 
     payload = await request.json()
-    # ожидаем поля: customer_id (int), category, address, when_text, pay, photos(optional list)
     try:
         cust_id = int(payload["customer_id"])
         category = str(payload["category"])
@@ -553,7 +524,7 @@ async def api_create_job(request: Request, authorization: str | None = Header(de
         dt = parse_when_ru(when_text)
         if not dt:
             raise ValueError("bad time")
-        ensure = USERS.setdefault(cust_id, {"chat_id": cust_id, "username": f"id{cust_id}", "role": "customer"})
+        USERS.setdefault(cust_id, {"chat_id": cust_id, "username": f"id{cust_id}", "role": "customer"})
         job = {
             "id": int(datetime.now().timestamp() * 1000),
             "user_id": cust_id,
@@ -569,7 +540,6 @@ async def api_create_job(request: Request, authorization: str | None = Header(de
         }
         JOBS.setdefault(cust_id, []).append(job)
         JOB_BY_ID[job["id"]] = job
-        # нотификация и рассылка
         try:
             await tg_app.bot.send_message(chat_id=USERS[cust_id]["chat_id"], text=f"Задача #{job['id']} создана через API ✅")
         except Exception:
