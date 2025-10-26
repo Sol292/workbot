@@ -89,7 +89,7 @@ customer_api = FastAPI(title="Customer API")
 
 @customer_api.on_event("startup")
 async def on_startup():
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={

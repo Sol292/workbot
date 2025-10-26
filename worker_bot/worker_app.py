@@ -149,7 +149,7 @@ worker_api = FastAPI(title="Worker API")
 @worker_api.on_event("startup")
 async def on_startup():
     global telegram_app
-    telegram_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    telegram_app = ApplicationBuilder().token(BOT_TOKEN).build()
     telegram_app.add_handler(CommandHandler("start", cmd_start))
     telegram_app.add_handler(CommandHandler("setcity", cmd_setcity))
     telegram_app.add_handler(CommandHandler("setcategories", cmd_setcategories))
