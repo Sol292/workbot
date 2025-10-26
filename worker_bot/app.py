@@ -8,12 +8,27 @@ from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKey
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, MessageHandler, ConversationHandler, CallbackQueryHandler, ContextTypes, filters
 import httpx
 
-BOT_TOKEN=os.environ["BOT_TOKEN"]
-BASE_URL=os.environ.get("BASE_URL")
-WEBHOOK_SECRET=os.environ.get("WEBHOOK_SECRET","secret")
-JOBS_API_TOKEN=os.environ["JOBS_API_TOKEN"]
-CUSTOMER_API_URL=os.environ["CUSTOMER_API_URL"]
+BOT_TOKEN       = os.getenv("BOT_TOKEN")
+WEBHOOK_SECRET  = os.getenv("WEBHOOK_SECRET")
+BASE_URL        = os.getenv("BASE_URL")
+JOBS_API_TOKEN=os.environ("JOBS_API_TOKEN")
+WORKER_API_URL  = os.getenv("WORKER_API_URL")  # может быть None
+CUSTOMER_API_URL=os.environ("CUSTOMER_API_URL")
 CUSTOMER_BOT_USERNAME=os.environ.get("CUSTOMER_BOT_USERNAME")
+
+# Жёстко требуем только то, без чего сервер жить не может:
+required = {
+    "BOT_TOKEN": BOT_TOKEN,
+    "WEBHOOK_SECRET": WEBHOOK_SECRET,
+    "BASE_URL": BASE_URL,
+}
+missing = [k for k, v in required.items() if not v]
+if missing:
+    raise RuntimeError(f"Missing required env vars: {', '.join(missing)}")
+
+# А с WORKER_API_URL — мягко: если нет, просто отключаем интеграцию
+if not WORKER_API_URL:
+    print("[WARN] WORKER_API_URL is not set — worker-интеграция будет отключена.")
 
 BTN_WORKMODE="Профиль исполнителя"; BTN_GO_ON="Доступен"; BTN_GO_OFF="Недоступен"; BTN_HELP="Помощь"; BTN_CANCEL="Отмена"; BTN_DONE="Готово"
 CATEGORIES=["Разнорабочие (общие)","Погрузка/разгрузка","Демонтаж","КлининГ","Курьер/доставка","Подсобник на стройку","Сборка мебели","Малярные работы","Электромонтаж (простые)","Сантехника (простые)","Вынос мусора","Уборка после ремонта"]

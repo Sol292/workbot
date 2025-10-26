@@ -8,12 +8,41 @@ from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKey
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, MessageHandler, ConversationHandler, CallbackQueryHandler, ContextTypes, filters
 import httpx
 
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-BASE_URL = os.environ.get("BASE_URL")
-WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "secret")
-JOBS_API_TOKEN = os.environ["JOBS_API_TOKEN"]
-WORKER_API_URL = os.environ["WORKER_API_URL"]
-WORKER_BOT_USERNAME = os.environ.get("WORKER_BOT_USERNAME")
+BOT_TOKEN       = os.getenv("BOT_TOKEN")
+WEBHOOK_SECRET  = os.getenv("WEBHOOK_SECRET")
+BASE_URL        = os.getenv("BASE_URL")
+JOBS_API_TOKEN = os.getenv("JOBS_API_TOKEN")
+WORKER_API_URL = os.getenv("WORKER_API_URL")
+WORKER_BOT_USERNAME = os.getenv("WORKER_BOT_USERNAME")
+
+# Жёстко требуем только то, без чего сервер жить не может:
+required = {
+    "BOT_TOKEN": BOT_TOKEN,
+    "WEBHOOK_SECRET": WEBHOOK_SECRET,
+    "BASE_URL": BASE_URL,
+}
+missing = [k for k, v in required.items() if not v]
+if missing:
+    raise RuntimeError(f"Missing required env vars: {', '.join(missing)}")
+
+from customer_bot.worker_client import call_worker   # импорт по пути из корня репо
+
+# Пример FastAPI-роута
+from fastapi import FastAPI, HTTPException
+app = FastAPI()
+
+@app.post("/match")
+async def match(req: dict):
+    data = await call_worker("match", req)
+    if data is None:
+        # воркера нет/упал — мягко отвечаем
+        raise HTTPException(status_code=501, detail="Worker is not configured")
+        # или: return {"status": "degraded", "items": []}
+    return {"status": "ok", "items": data.get("items", [])}
+
+# А с WORKER_API_URL — мягко: если нет, просто отключаем интеграцию
+if not WORKER_API_URL:
+    print("[WARN] WORKER_API_URL is not set — worker-интеграция будет отключена.")
 
 BTN_NEWJOB="Создать задачу"; BTN_MYJOBS="Мои задачи"; BTN_HELP="Помощь"
 BTN_CANCEL="Отмена"; BTN_DONE="Готово"; BTN_SKIP="Пропустить"
