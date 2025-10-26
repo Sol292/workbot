@@ -21,17 +21,20 @@ from telegram.ext import (
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "secret")
 BASE_URL = os.environ.get("BASE_URL")
-JOBS_API_TOKEN = os.environ.get("JOBS_API_TOKEN")  # для внешнего API
+JOBS_API_TOKEN = os.environ.get("JOBS_API_TOKEN")
+ROLE_LOCK = (os.environ.get("ROLE_LOCK") or "").strip().lower()  # "", "customer", "worker"
+CUSTOMER_BOT_USERNAME = os.environ.get("CUSTOMER_BOT_USERNAME")  # например @my_customer_bot
+WORKER_BOT_USERNAME   = os.environ.get("WORKER_BOT_USERNAME")    # например @my_worker_bot
 
 # ========= FASTAPI & PTB =========
 app = FastAPI()
 tg_app: Application = ApplicationBuilder().token(BOT_TOKEN).build()
 
 # ========= IN-MEMORY STORAGE =========
-JOBS: dict[int, list[dict]] = {}          # {customer_id: [job,...]}
-USERS: dict[int, dict] = {}               # {user_id: {chat_id, username, role}}
-WORKERS: dict[int, dict] = {}             # {user_id: {city, cats:set, radius:int, available:bool}}
-JOB_BY_ID: dict[int, dict] = {}           # {job_id: job}
+JOBS: dict[int, list[dict]] = {}
+USERS: dict[int, dict] = {}
+WORKERS: dict[int, dict] = {}
+JOB_BY_ID: dict[int, dict] = {}
 
 # ========= BUTTON LABELS =========
 BTN_NEWJOB   = "Создать задачу"
@@ -63,12 +66,14 @@ RADIUS_CHOICES = [2, 5, 10, 25]
 
 # ========= HELPERS =========
 def _main_menu_kb():
-    return ReplyKeyboardMarkup(
-        [[BTN_NEWJOB, BTN_MYJOBS],
-         [BTN_WORKMODE, BTN_GO_ON, BTN_GO_OFF],
-         [BTN_HELP]],
-        resize_keyboard=True
-    )
+    """Показываем только релевантные кнопки, если ROLE_LOCK задан."""
+    if ROLE_LOCK == "customer":
+        rows = [[BTN_NEWJOB, BTN_MYJOBS], [BTN_HELP]]
+    elif ROLE_LOCK == "worker":
+        rows = [[BTN_WORKMODE, BTN_GO_ON, BTN_GO_OFF], [BTN_HELP]]
+    else:
+        rows = [[BTN_NEWJOB, BTN_MYJOBS], [BTN_WORKMODE, BTN_GO_ON, BTN_GO_OFF], [BTN_HELP]]
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 def _categories_kb(exclude: set[str] | None = None):
     exclude = exclude or set()
@@ -98,7 +103,6 @@ def parse_when_ru(text: str) -> datetime | None:
     text = (text or "").strip()
     if not text:
         return None
-    # простой HH:MM → сегодня/завтра
     if re.fullmatch(r"\d{1,2}:\d{2}", text):
         hh, mm = text.split(":")
         candidate = now.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
@@ -117,34 +121,39 @@ def parse_when_ru(text: str) -> datetime | None:
     )
     return dt
 
+def denied_txt(feature: str) -> str:
+    if ROLE_LOCK == "worker":
+        to = CUSTOMER_BOT_USERNAME or "бот заказчика"
+        return f"{feature} доступно в {to}."
+    if ROLE_LOCK == "customer":
+        to = WORKER_BOT_USERNAME or "боте исполнителя"
+        return f"{feature} доступно в {to}."
+    return "Недоступно."
+
 # ========= BASIC =========
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ensure_user(update)
+    who = "исполнителя" if ROLE_LOCK == "worker" else "заказчика" if ROLE_LOCK == "customer" else "заказчика/исполнителя"
     await update.message.reply_text(
-        "Привет! Я связываю заказчиков и исполнителей.\n"
-        f"• {BTN_NEWJOB} — создать задачу\n"
-        f"• {BTN_MYJOBS} — список твоих задач\n"
-        f"• {BTN_WORKMODE} — профиль исполнителя\n"
-        f"• {BTN_GO_ON}/{BTN_GO_OFF} — доступность",
+        f"Привет! Это бот для {who}.\n"
+        f"{'Здесь можно создавать задачи.' if ROLE_LOCK in ('', 'customer') else ''}"
+        f"{' Здесь можно настраивать профиль исполнителя и откликаться.' if ROLE_LOCK in ('', 'worker') else ''}",
         reply_markup=_main_menu_kb()
     )
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        f"Кнопки:\n"
-        f"• {BTN_NEWJOB} — мастер создания задачи\n"
-        f"• {BTN_MYJOBS} — твои задачи\n"
-        f"• {BTN_WORKMODE} — онбординг исполнителя\n"
-        f"• {BTN_GO_ON}/{BTN_GO_OFF} — статус доступности",
+        "Подсказка по кнопкам внизу — выбери нужный пункт меню.",
         reply_markup=_main_menu_kb()
     )
 
 async def list_myjobs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if ROLE_LOCK == "worker":
+        return await update.message.reply_text(denied_txt("Список задач"), reply_markup=_main_menu_kb())
     uid = update.effective_user.id
     items = JOBS.get(uid, [])
     if not items:
-        await update.message.reply_text("У тебя пока нет задач.", reply_markup=_main_menu_kb())
-        return
+        await update.message.reply_text("У тебя пока нет задач.", reply_markup=_main_menu_kb()); return
     lines = []
     for j in sorted(items, key=lambda x: x["created_at"], reverse=True)[:10]:
         chosen = j.get("chosen_worker")
@@ -160,6 +169,8 @@ async def list_myjobs(update: Update, context: ContextTypes.DEFAULT_TYPE):
 (S_CAT, S_ADDR, S_WHEN, S_PAY, S_PHOTOS, S_CONFIRM) = range(6)
 
 async def newjob_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if ROLE_LOCK == "worker":
+        return await update.message.reply_text(denied_txt("Создание задач"), reply_markup=_main_menu_kb())
     ensure_user(update)
     USERS[update.effective_user.id]["role"] = USERS.get(update.effective_user.id,{}).get("role") or "customer"
     context.user_data.clear(); context.user_data["photos"] = []
@@ -169,8 +180,7 @@ async def newjob_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def newjob_cat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
     if text.lower() == BTN_CANCEL.lower():
-        await update.message.reply_text("Отменено.", reply_markup=_main_menu_kb())
-        return ConversationHandler.END
+        await update.message.reply_text("Отменено.", reply_markup=_main_menu_kb()); return ConversationHandler.END
     if text not in CATEGORIES:
         await update.message.reply_text("Выбери из списка кнопок.", reply_markup=_categories_kb()); return S_CAT
     context.user_data["category"] = text
@@ -205,7 +215,6 @@ async def newjob_pay(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def newjob_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip().lower() if update.message and update.message.text else ""
     if text in (BTN_DONE.lower(), BTN_SKIP.lower()):
-        # идём к подтверждению
         d = context.user_data
         txt = (
             "Проверь карточку задачи:\n\n"
@@ -215,8 +224,7 @@ async def newjob_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• Бюджет: {d['pay']}\n\n"
             "Отправить? (Да/Нет)"
         )
-        await update.message.reply_text(txt)
-        return S_CONFIRM
+        await update.message.reply_text(txt); return S_CONFIRM
 
     photos = context.user_data.get("photos", [])
     if update.message and update.message.photo:
@@ -231,9 +239,7 @@ async def newjob_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def newjob_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if (update.message.text or "").strip().lower() != "да":
-        await update.message.reply_text("Ок, отменил.", reply_markup=_main_menu_kb()); context.user_data.clear()
-        return ConversationHandler.END
-
+        await update.message.reply_text("Ок, отменил.", reply_markup=_main_menu_kb()); context.user_data.clear(); return ConversationHandler.END
     uid = update.effective_user.id
     d = context.user_data
     job = {
@@ -252,22 +258,18 @@ async def newjob_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     JOBS.setdefault(uid, []).append(job)
     JOB_BY_ID[job["id"]] = job
     context.user_data.clear()
-
-    await update.message.reply_text(
-        f"Задача создана ✅\nID: {job['id']}\nНачинаю рассылку исполнителям.",
-        reply_markup=_main_menu_kb()
-    )
-    await broadcast_job(job)
-    return ConversationHandler.END
+    await update.message.reply_text(f"Задача создана ✅\nID: {job['id']}\nНачинаю рассылку исполнителям.", reply_markup=_main_menu_kb())
+    await broadcast_job(job); return ConversationHandler.END
 
 # ========= WORKER ONBOARDING =========
 (W_CITY, W_CATS, W_RADIUS) = range(10,13)
 
 async def cmd_workmode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if ROLE_LOCK == "customer":
+        return await update.message.reply_text(denied_txt("Профиль исполнителя"), reply_markup=_main_menu_kb())
     ensure_user(update)
     USERS[update.effective_user.id]["role"] = "worker"
-    context.user_data.clear()
-    context.user_data["cats"] = set()
+    context.user_data.clear(); context.user_data["cats"] = set()
     await update.message.reply_text("Укажи город одним словом (например: 'Тверь').", reply_markup=ReplyKeyboardRemove())
     return W_CITY
 
@@ -293,7 +295,6 @@ async def w_cats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return W_RADIUS
     if text not in CATEGORIES:
         await update.message.reply_text("Выбирай кнопками или 'Готово'.", reply_markup=_categories_kb(context.user_data["cats"])); return W_CATS
-    # добавляем категорию и убираем её из клавиатуры
     context.user_data["cats"].add(text)
     await update.message.reply_text("Добавлено: " + ", ".join(context.user_data["cats"]),
                                     reply_markup=_categories_kb(context.user_data["cats"]))
@@ -305,12 +306,7 @@ async def w_radius(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Выбери из кнопок радиус."); return W_RADIUS
     radius = int(t)
     uid = update.effective_user.id
-    WORKERS[uid] = {
-        "city": context.user_data["city"],
-        "cats": set(context.user_data["cats"]),
-        "radius": radius,
-        "available": True,
-    }
+    WORKERS[uid] = {"city": context.user_data["city"], "cats": set(context.user_data["cats"]), "radius": radius, "available": True}
     USERS[uid]["role"] = "worker"
     context.user_data.clear()
     await update.message.reply_text(
@@ -321,6 +317,8 @@ async def w_radius(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def go_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if ROLE_LOCK == "customer":
+        return await update.message.reply_text(denied_txt("Смена статуса"), reply_markup=_main_menu_kb())
     uid = update.effective_user.id
     if uid in WORKERS:
         WORKERS[uid]["available"] = True
@@ -329,6 +327,8 @@ async def go_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Сначала «{BTN_WORKMODE}».", reply_markup=_main_menu_kb())
 
 async def go_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if ROLE_LOCK == "customer":
+        return await update.message.reply_text(denied_txt("Смена статуса"), reply_markup=_main_menu_kb())
     uid = update.effective_user.id
     if uid in WORKERS:
         WORKERS[uid]["available"] = False
@@ -359,8 +359,7 @@ async def broadcast_job(job: dict):
         pass
 
 async def cbq_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
+    q = update.callback_query; await q.answer()
     data = q.data or ""
     if data.startswith("bid:"):
         job_id = int(data.split(":")[1]);  return await handle_bid(update, job_id)
@@ -446,22 +445,17 @@ conv_worker = ConversationHandler(
     allow_reentry=True,
 )
 
-# Отдельные кнопки «доступен/недоступен», «мои задачи», «помощь»
-btn_myjobs = MessageHandler(filters.Regex(re.compile(rf"^{re.escape(BTN_MYJOBS)}$", re.IGNORECASE)), list_myjobs)
-btn_go_on  = MessageHandler(filters.Regex(re.compile(rf"^{re.escape(BTN_GO_ON)}$", re.IGNORECASE)), go_on)
-btn_go_off = MessageHandler(filters.Regex(re.compile(rf"^{re.escape(BTN_GO_OFF)}$", re.IGNORECASE)), go_off)
-btn_help   = MessageHandler(filters.Regex(re.compile(rf"^{re.escape(BTN_HELP)}$", re.IGNORECASE)), cmd_help)
+# Кнопки вне разговоров
+tg_app.add_handler(MessageHandler(filters.Regex(re.compile(rf"^{re.escape(BTN_MYJOBS)}$", re.IGNORECASE)), list_myjobs))
+tg_app.add_handler(MessageHandler(filters.Regex(re.compile(rf"^{re.escape(BTN_GO_ON)}$",  re.IGNORECASE)), go_on))
+tg_app.add_handler(MessageHandler(filters.Regex(re.compile(rf"^{re.escape(BTN_GO_OFF)}$", re.IGNORECASE)), go_off))
 
-# Регистрируем
+# Общие
 tg_app.add_handler(CommandHandler("start", cmd_start))
 tg_app.add_handler(CommandHandler("help", cmd_help))
 tg_app.add_handler(CommandHandler("myjobs", list_myjobs))
 tg_app.add_handler(CommandHandler("go_on", go_on))
 tg_app.add_handler(CommandHandler("go_off", go_off))
-tg_app.add_handler(btn_myjobs)
-tg_app.add_handler(btn_go_on)
-tg_app.add_handler(btn_go_off)
-tg_app.add_handler(btn_help)
 tg_app.add_handler(conv_worker)
 tg_app.add_handler(conv_newjob)
 tg_app.add_handler(CallbackQueryHandler(cbq_handler))
@@ -500,7 +494,7 @@ async def telegram_webhook(request: Request, secret: str):
         return {"ok": False}
     return {"ok": True}
 
-# ========= PUBLIC API: CREATE JOB =========
+# ========= PUBLIC API =========
 @app.post("/api/jobs")
 async def api_create_job(request: Request, authorization: str | None = Header(default=None), x_api_key: str | None = Header(default=None)):
     token = None
@@ -549,7 +543,7 @@ async def api_create_job(request: Request, authorization: str | None = Header(de
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"bad payload: {e}")
 
-# ========= HEALTH / DEBUG =========
+# ========= HEALTH =========
 @app.get("/")
 async def root():
     return {"ok": True}
@@ -559,6 +553,7 @@ async def debug():
     return {
         "has_bot_token": bool(BOT_TOKEN),
         "has_base_url": bool(BASE_URL),
+        "role_lock": ROLE_LOCK,
         "base_url": BASE_URL,
         "jobs_count": sum(len(v) for v in JOBS.values()),
         "workers_count": len(WORKERS),
