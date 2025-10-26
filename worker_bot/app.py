@@ -4,9 +4,20 @@ from datetime import datetime, timedelta
 from json import JSONDecodeError
 import dateparser
 from fastapi import FastAPI, Request, HTTPException, Header
+import logging, re, time
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, MessageHandler, ConversationHandler, CallbackQueryHandler, ContextTypes, filters
 import httpx
+
+log = logging.getLogger(__name__)
+
+def _norm_city(s: str) -> str:
+    s = (s or "").lower().replace("ё", "е")
+    s = re.sub(r"\bг[.\s]+", "", s)        # г. тверь → тверь
+    return re.sub(r"\s+", " ", s).strip()
+
+def _norm_slug(s: str) -> str:
+    return (s or "").strip().lower()
 
 BOT_TOKEN       = os.getenv("BOT_TOKEN")
 WEBHOOK_SECRET  = os.getenv("WEBHOOK_SECRET")
@@ -117,29 +128,71 @@ async def go_off(u:Update,c):
     WORKERS[uid]["available"]=False; await u.message.reply_text("Статус: Недоступен ⛔", reply_markup=kb_main())
 
 # --- API: customer -> worker (рассылка и выбор)
-@app.post("/api/push-job")
-async def api_push_job(req:Request, authorization: str | None = Header(default=None)):
-    if not (authorization and authorization.lower().startswith("bearer ") and authorization.split(" ",1)[1].strip()==JOBS_API_TOKEN):
+@app.post("/api/push-job")   # проверь, чтобы путь совпадал с тем, что дергает customer
+async def api_push_job(req: Request, authorization: str | None = Header(default=None)):
+    # --- auth ---
+    if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="bad api token")
-    body=await req.json()
-    body = await request.json()
-    job = body.get("job") or body
-    job_id = job.get("job_id")
-    city = job.get("city")
-    category = job.get("category"); customer_contact=body.get("customer_contact","")
-    # матчинг: по доступности, категории и вхождению города в адрес (просто)
-    cat=job["category"]; addr=job["address"].lower()
-    sent=0
+    token = authorization.split(" ", 1)[1].strip()
+    if token != JOBS_API_TOKEN:
+        raise HTTPException(status_code=401, detail="bad api token")
+
+    # --- payload ---
+    body = await req.json()                 # ОСТАВЛЯЕМ req, не request
+    job = body.get("job") or body           # поддерживаем оба формата
+    customer_contact = str(body.get("customer_contact", ""))
+
+    job_id  = str(job.get("job_id") or job.get("id") or f"tmp-{int(time.time())}")
+    city_in = job.get("city") or ""
+    cat_in  = job.get("category") or ""
+    addr    = (job.get("address") or "").strip()
+    when    = job.get("when") or ""
+    pay     = job.get("pay") or ""
+
+    city_norm = _norm_city(city_in)
+    cat_slug  = _norm_slug(cat_in)
+
+    # --- matching ---
+    matched = []
     for wid, w in WORKERS.items():
-        if not w["available"]:  continue
-        if cat not in w["cats"]: continue
-        if w["city"].lower() not in addr: continue
-        kb=InlineKeyboardMarkup([[InlineKeyboardButton("Откликнуться", callback_data=f"bid:{job['id']}:{customer_contact}")]])
-        txt=f"Новая задача #{job['id']}\n{job['category']} • {job['when']}\n{job['address']}\nБюджет: {job['pay']}"
+        if not w.get("available"):                  continue
+        if cat_slug not in (w.get("cats") or []):   continue
+        aliases = (w.get("city_aliases") or []) + [_norm_city(w.get("city") or "")]
+        if city_norm not in aliases:                continue
+        matched.append(wid)
+
+    # --- send notifications ---
+    sent = 0
+    for wid in matched:
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(
+                text="Откликнуться",
+                callback_data=f"bid:{job_id}:{customer_contact}"
+            )
+        ]])
+        txt = (
+            f"Новая задача #{job_id}\n"
+            f"Категория: {cat_in or '—'}\n"
+            f"Где: {addr or city_in or '—'}\n"
+            f"Когда: {when or 'по согласованию'}\n"
+            f"Оплата: {pay or 'не указана'}"
+        )
         try:
-            await tg_app.bot.send_message(chat_id=USERS.get(wid,{}).get("chat_id", wid), text=txt, reply_markup=kb); sent+=1
-        except Exception: pass
-    return {"ok":True, "sent":sent}
+            await app.bot.send_message(chat_id=USERS.get(wid, {}).get("chat_id", wid),
+                                       text=txt, reply_markup=kb)
+            sent += 1
+        except Exception as e:
+            log.exception("send failed wid=%s job_id=%s: %s", wid, job_id, e)
+
+    return {
+        "ok": True,
+        "sent": sent,
+        "matched_workers": len(matched),
+        "city_in": city_in,
+        "city_norm": city_norm,
+        "category_in": cat_in,
+        "category_slug": cat_slug,
+    }
 
 @app.post("/api/chosen")
 async def api_chosen(req:Request, authorization: str | None = Header(default=None)):
