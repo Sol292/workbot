@@ -11,7 +11,7 @@ import httpx
 BOT_TOKEN       = os.getenv("BOT_TOKEN")
 WEBHOOK_SECRET  = os.getenv("WEBHOOK_SECRET")
 BASE_URL        = os.getenv("BASE_URL")
-JOBS_API_TOKEN = os.getenv("JOBS_API_TOKEN")
+JOBS_API_TOKEN = os.getenv["JOBS_API_TOKEN"]
 WORKER_API_URL = os.getenv("WORKER_API_URL")
 WORKER_BOT_USERNAME = os.getenv("WORKER_BOT_USERNAME")
 
@@ -25,7 +25,7 @@ missing = [k for k, v in required.items() if not v]
 if missing:
     raise RuntimeError(f"Missing required env vars: {', '.join(missing)}")
 
-from .worker_client import call_worker   # импорт по пути из корня репо
+from worker_client import call_worker   # импорт по пути из корня репо
 
 # Пример FastAPI-роута
 from fastapi import FastAPI, HTTPException

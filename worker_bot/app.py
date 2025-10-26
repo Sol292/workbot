@@ -11,9 +11,9 @@ import httpx
 BOT_TOKEN       = os.getenv("BOT_TOKEN")
 WEBHOOK_SECRET  = os.getenv("WEBHOOK_SECRET")
 BASE_URL        = os.getenv("BASE_URL")
-JOBS_API_TOKEN=os.environ("JOBS_API_TOKEN")
+JOBS_API_TOKEN  = os.environ["JOBS_API_TOKEN"]
 WORKER_API_URL  = os.getenv("WORKER_API_URL")  # может быть None
-CUSTOMER_API_URL=os.environ("CUSTOMER_API_URL")
+CUSTOMER_API_URL=os.environ["CUSTOMER_API_URL"]
 CUSTOMER_BOT_USERNAME=os.environ.get("CUSTOMER_BOT_USERNAME")
 
 # Жёстко требуем только то, без чего сервер жить не может:
