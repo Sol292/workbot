@@ -127,6 +127,20 @@ async def go_off(u:Update,c):
     if uid not in WORKERS: return await u.message.reply_text("Сначала настрой «Профиль исполнителя».", reply_markup=kb_main())
     WORKERS[uid]["available"]=False; await u.message.reply_text("Статус: Недоступен ⛔", reply_markup=kb_main())
 
+@app.get("/api/debug/workers")   # debug temp DELETE!!!
+async def debug_workers():
+    def _row(wid, w):
+        return {
+            "wid": wid,
+            "available": w.get("available"),
+            "city": w.get("city"),
+            "city_norm": _norm_city(w.get("city") or ""),
+            "city_aliases": (w.get("city_aliases") or []),
+            "cats": (w.get("cats") or []),
+            "chat_id": (USERS.get(wid, {}) or {}).get("chat_id")
+        }
+    return {"count": len(WORKERS), "workers": [_row(wid, w) for wid, w in WORKERS.items()]}
+
 # --- API: customer -> worker (рассылка и выбор)
 @app.post("/api/push-job")   # проверь, чтобы путь совпадал с тем, что дергает customer
 async def api_push_job(req: Request, authorization: str | None = Header(default=None)):
