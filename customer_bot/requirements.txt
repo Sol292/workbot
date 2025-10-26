@@ -1,8 +1,0 @@
-python-telegram-bot==20.7
-fastapi==0.115.2
-uvicorn[standard]==0.30.6
-h11==0.14.0
-anyio==4.4.0
-pydantic==2.9.2
-python-dotenv==1.0.1
-dateparser

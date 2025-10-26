@@ -25,7 +25,7 @@ missing = [k for k, v in required.items() if not v]
 if missing:
     raise RuntimeError(f"Missing required env vars: {', '.join(missing)}")
 
-from customer_bot.worker_client import call_worker   # импорт по пути из корня репо
+from .worker_client import call_worker   # импорт по пути из корня репо
 
 # Пример FastAPI-роута
 from fastapi import FastAPI, HTTPException
