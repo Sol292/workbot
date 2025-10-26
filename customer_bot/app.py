@@ -15,6 +15,7 @@ JOBS_API_TOKEN  = os.getenv("WORKER_API_URL")
 WORKER_API_URL  = os.getenv("WORKER_API_URL")  # может быть None
 CUSTOMER_API_URL=os.getenv("CUSTOMER_API_URL")
 CUSTOMER_BOT_USERNAME=os.environ.get("CUSTOMER_BOT_USERNAME")
+WORKER_BOT_USERNAME = os.environ.get("WORKER_BOT_USERNAME", "")
 
 # Жёстко требуем только то, без чего сервер жить не может:
 required = {
@@ -81,7 +82,8 @@ def parse_when(text:str):
 async def start(u:Update,c:ContextTypes.DEFAULT_TYPE):
     ensure_user(u)
     msg="Привет! Это бот для заказчиков.\nСоздавай задачи — я разошлю их исполнителям."
-    if WORKER_BOT_USERNAME: msg+=f"\nБот исполнителя: {WORKER_BOT_USERNAME}"
+    if WORKER_BOT_USERNAME:
+        msg+=f"\nБот исполнителя: {WORKER_BOT_USERNAME}"
     await u.message.reply_text(msg, reply_markup=kb_main())
 
 async def help_cmd(u:Update,c): await u.message.reply_text("Используй кнопки внизу.", reply_markup=kb_main())
