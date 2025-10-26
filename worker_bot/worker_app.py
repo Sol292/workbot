@@ -1,179 +1,187 @@
-# worker_app.py
-# FastAPI + Telegram Bot (PTB v20+) — принимает задачи от customer и рассылает воркерам по матчу
+import os
+import asyncio
+import logging
+from typing import Dict, List, Optional, Set
 
-import os, re, time, logging
-from typing import Dict, Any, List, Set
+from fastapi import FastAPI, Depends, Header, HTTPException
+from pydantic import BaseModel, Field
+from uvicorn import Config, Server
 
-from fastapi import FastAPI, Request, Header, HTTPException
-from pydantic import BaseModel
-from telegram import Bot, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import Update
+from telegram.ext import (
+    Application, ApplicationBuilder, CommandHandler, ContextTypes, filters
+)
 
-# ---------- конфиг / окружение ----------
-BOT_TOKEN       = os.getenv("BOT_TOKEN")                      # токен воркер-бота
-JOBS_API_TOKEN  = os.getenv("JOBS_API_TOKEN")                 # общий API токен customer↔worker
-BASE_URL        = os.getenv("BASE_URL")                       # https://workbot-worker-production.up.railway.app
+# ---------------------------------
+# Config
+# ---------------------------------
+logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s')
+logger = logging.getLogger("worker")
 
-if not BOT_TOKEN or not JOBS_API_TOKEN or not BASE_URL:
-    missing = [k for k,v in {"BOT_TOKEN":BOT_TOKEN, "JOBS_API_TOKEN":JOBS_API_TOKEN, "BASE_URL":BASE_URL}.items() if not v]
-    raise RuntimeError(f"Missing env vars: {', '.join(missing)}")
+CITIES: List[str] = ["Москва", "Тверь", "Санкт-Петербург", "Зеленоград"]
+CATEGORIES: List[str] = ["Вентиляция", "Кондиционирование", "Электрика", "Сантехника"]
 
-# ---------- данные (в реале — БД; здесь — память для простоты) ----------
-# USERS: { worker_id: {"chat_id": int, "...": ...} }
-USERS: Dict[str, Dict[str, Any]] = {}
-# WORKERS: { worker_id: {"available": bool, "city": str, "city_aliases":[...], "cats":[slug|label,...]} }
-WORKERS: Dict[str, Dict[str, Any]] = {}
+JOBS_API_TOKEN = os.getenv("JOBS_API_TOKEN", "")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 
-# ---------- утилиты ----------
-log = logging.getLogger("worker")
-logging.basicConfig(level=logging.INFO)
+# ---------------------------------
+# Models
+# ---------------------------------
+class Job(BaseModel):
+    city: str
+    category: str
+    title: str
+    description: str
 
-def norm_city(s: str) -> str:
-    s = (s or "").lower().replace("ё", "е")
-    s = re.sub(r"\bг[.\s]+", "", s)  # г. тверь -> тверь
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
 
-# алиасы категорий → слаги
-CATEGORY_MAP = {
-    # слаги
-    "handyman":"handyman","loader":"loader","courier":"courier","cleaning":"cleaning",
-    "demontazh":"demontazh","electric":"electric","plumbing":"plumbing","furniture":"furniture",
-    "garbage":"garbage","minor_repair":"minor_repair",
-    # русские имена → слаги (под твой список)
-    "разнорабочие (общие)":"handyman",
-    "погрузка/разгрузка":"loader",
-    "курьер/доставка":"courier",
-    "уборка после ремонта":"cleaning",
-    "демонтаж":"demontazh",
-    "электромонтаж (простые)":"electric",
-    "сантехника (простые)":"plumbing",
-    "сборка мебели":"furniture",
-    "вынос мусора":"garbage",
-    "малярные работы":"minor_repair",
-    "клининг":"cleaning",
-    "подсобник на стройку":"handyman",
-    "персональные поручения":"handyman",
-}
+class PushJobRequest(Job):
+    preview_only: bool = Field(False, description="Если True — только считать совпадения, без рассылки")
 
-def norm_slug(s: str) -> str:
-    s = (s or "").strip().lower()
-    return CATEGORY_MAP.get(s, s)
 
-# ---------- Telegram bot ----------
-bot = Bot(token=BOT_TOKEN)
+class PushJobResponse(BaseModel):
+    ok: bool
+    matched: int
+    sent: int
+    unmatched_reason: Optional[str] = None
 
-# ---------- FastAPI ----------
-app = FastAPI(title="workbot-worker")
 
-class PushJobPayload(BaseModel):
-    # принимаем либо плоский JSON, либо {"job": {...}}
-    job: Dict[str, Any] | None = None
-    customer_contact: str | None = None
+class WorkerProfile(BaseModel):
+    user_id: int
+    city: Optional[str] = None
+    categories: Set[str] = set()
 
-@app.get("/api/health")
-def health():
-    return {"ok": True, "service": "worker"}
 
-@app.get("/")
-def root():
-    return {"ok": True, "service": "worker"}
+WORKERS: Dict[int, WorkerProfile] = {}
 
-@app.get("/api/debug/workers")
-def debug_workers():
-    def row(wid: str, w: Dict[str, Any]):
-        return {
-            "wid": wid,
-            "available": bool(w.get("available")),
-            "city": w.get("city"),
-            "city_norm": norm_city(w.get("city") or ""),
-            "city_aliases": w.get("city_aliases") or [],
-            "cats": w.get("cats") or [],
-            "chat_id": (USERS.get(wid, {}) or {}).get("chat_id"),
-        }
-    return {"count": len(WORKERS), "workers": [row(wid,w) for wid,w in WORKERS.items()]}
+# ---------------------------------
+# Auth
+# ---------------------------------
+async def verify_token(x_api_token: str = Header("")):
+    if JOBS_API_TOKEN and x_api_token != JOBS_API_TOKEN:
+        raise HTTPException(status_code=401, detail="invalid token")
 
-@app.post("/api/debug/upsert-worker")
-def upsert_worker(payload: Dict[str, Any]):
-    """
-    Быстро добавить/обновить исполнителя для теста.
-    payload: {"wid":"999","city":"Тверь","cats":["Разнорабочие (общие)"],"available":true,"chat_id":123}
-    """
-    wid = str(payload.get("wid") or "test")
-    w = WORKERS.setdefault(wid, {})
-    w["available"] = bool(payload.get("available", True))
-    w["city"] = payload.get("city", "Тверь")
-    w["city_aliases"] = list(set((w.get("city_aliases") or []) + [norm_city(w["city"])]))
-    w["cats"] = payload.get("cats") or ["Разнорабочие (общие)"]
-    USERS.setdefault(wid, {})
-    if payload.get("chat_id"):
-        USERS[wid]["chat_id"] = payload["chat_id"]
-    return {"ok": True, "worker": WORKERS[wid], "user": USERS.get(wid)}
+# ---------------------------------
+# Telegram handlers
+# ---------------------------------
+telegram_app: Optional[Application] = None
 
-@app.post("/api/push-job")
-async def api_push_job(req: Request, authorization: str | None = Header(default=None)):
-    # auth
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="bad api token")
-    token = authorization.split(" ", 1)[1].strip()
-    if token != JOBS_API_TOKEN:
-        raise HTTPException(status_code=401, detail="bad api token")
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    WORKERS[user.id] = WORKERS.get(user.id, WorkerProfile(user_id=user.id))
+    await update.message.reply_text(
+        "Вы зарегистрированы как исполнитель.\n"
+        "Город: /setcity <город>\n"
+        "Категории: /setcategories <список через запятую>\n"
+        f"Доступные города: {', '.join(CITIES)}\n"
+        f"Доступные категории: {', '.join(CATEGORIES)}"
+    )
 
-    raw = await req.json()
-    body: Dict[str, Any] = raw if isinstance(raw, dict) else {}
-    job: Dict[str, Any] = body.get("job") or body
-    customer_contact = str(body.get("customer_contact", ""))
+async def cmd_setcity(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not context.args:
+        await update.message.reply_text("Укажите город: /setcity Тверь")
+        return
+    city = " ".join(context.args)
+    if city not in CITIES:
+        await update.message.reply_text(f"Неизвестный город. Доступные: {', '.join(CITIES)}")
+        return
+    profile = WORKERS.get(user.id, WorkerProfile(user_id=user.id))
+    profile.city = city
+    WORKERS[user.id] = profile
+    await update.message.reply_text(f"Город установлен: {city}")
 
-    job_id  = str(job.get("job_id") or job.get("id") or f"tmp-{int(time.time())}")
-    city_in = str(job.get("city") or "")
-    addr    = str(job.get("address") or "")
-    when    = str(job.get("when") or "")
-    pay     = str(job.get("pay") or "")
-    cat_in  = str(job.get("category") or job.get("category_slug") or "")
+async def cmd_setcategories(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not context.args:
+        await update.message.reply_text("Укажите категории через запятую: /setcategories Вентиляция, Кондиционирование")
+        return
+    raw = " ".join(context.args)
+    chosen = {c.strip() for c in raw.split(",") if c.strip()}
+    unknown = chosen - set(CATEGORIES)
+    if unknown:
+        await update.message.reply_text(f"Неизвестные категории: {', '.join(unknown)}")
+        return
+    profile = WORKERS.get(user.id, WorkerProfile(user_id=user.id))
+    profile.categories = chosen
+    WORKERS[user.id] = profile
+    await update.message.reply_text(f"Категории сохранены: {', '.join(sorted(chosen))}")
 
-    city_norm = norm_city(city_in)
-    cat_slug  = norm_slug(cat_in)
+async def cmd_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    p = WORKERS.get(user.id)
+    if not p:
+        await update.message.reply_text("Вы ещё не зарегистрированы. Нажмите /start")
+        return
+    await update.message.reply_text(
+        f"Профиль:\nГород: {p.city or 'не указан'}\nКатегории: {', '.join(sorted(p.categories)) or 'не указаны'}"
+    )
 
-    matched: List[str] = []
-    for wid, w in WORKERS.items():
-        if not w.get("available"):
-            continue
-        worker_cats: Set[str] = { norm_slug(c) for c in (w.get("cats") or []) }
-        if cat_slug not in worker_cats:
-            continue
-        aliases = (w.get("city_aliases") or []) + [norm_city(w.get("city") or "")]
-        if city_norm not in aliases:
-            continue
-        matched.append(wid)
-
+# ---------------------------------
+# Notify
+# ---------------------------------
+async def notify_workers(job: Job) -> int:
+    if not telegram_app:
+        logger.error("Telegram app not ready")
+        return 0
+    matched = [
+        uid for uid, prof in WORKERS.items()
+        if prof.city == job.city and job.category in prof.categories
+    ]
+    text = (
+        f"Новая задача в городе {job.city}\n"
+        f"Категория: {job.category}\n\n"
+        f"{job.title}\n{job.description}"
+    )
     sent = 0
-    for wid in matched:
-        chat_id = (USERS.get(wid, {}) or {}).get("chat_id")
-        if not chat_id:
-            log.warning("No chat_id for wid=%s — пропускаем отправку", wid)
-            continue
-        kb = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("Откликнуться", callback_data=f"bid:{job_id}:{customer_contact}")]]
-        )
-        text = (
-            f"Новая задача #{job_id}\n"
-            f"Категория: {cat_in or '—'}\n"
-            f"Где: {addr or city_in or '—'}\n"
-            f"Когда: {when or 'по согласованию'}\n"
-            f"Оплата: {pay or 'не указана'}"
-        )
+    for uid in matched:
         try:
-            await bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
+            await telegram_app.bot.send_message(uid, text)
             sent += 1
         except Exception as e:
-            log.exception("send failed: wid=%s job_id=%s: %s", wid, job_id, e)
+            logger.warning(f"send to {uid} failed: {e}")
+    return sent
 
-    return {
-        "ok": True,
-        "sent": sent,
-        "matched_workers": len(matched),
-        "city_in": city_in,
-        "city_norm": city_norm,
-        "category_in": cat_in,
-        "category_slug": cat_slug,
-        "reason": "OK" if sent else ("NO_MATCH" if matched == [] else "NO_CHAT_ID"),
-    }
+# ---------------------------------
+# FastAPI app
+# ---------------------------------
+worker_api = FastAPI(title="Worker API")
+
+@worker_api.on_event("startup")
+async def on_startup():
+    global telegram_app
+    telegram_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    telegram_app.add_handler(CommandHandler("start", cmd_start))
+    telegram_app.add_handler(CommandHandler("setcity", cmd_setcity))
+    telegram_app.add_handler(CommandHandler("setcategories", cmd_setcategories))
+    telegram_app.add_handler(CommandHandler("profile", cmd_profile))
+    asyncio.create_task(telegram_app.run_polling())
+
+@worker_api.on_event("shutdown")
+async def on_shutdown():
+    if telegram_app:
+        await telegram_app.stop()
+
+@worker_api.get("/api/health")
+async def health():
+    return {"ok": True}
+
+@worker_api.get("/api/debug/workers")
+async def debug_workers():
+    return {"count": len(WORKERS), "items": [p.dict() for p in WORKERS.values()]}
+
+@worker_api.post("/api/push-job", dependencies=[Depends(verify_token)])
+async def push_job(req: PushJobRequest) -> PushJobResponse:
+    if req.city not in CITIES:
+        return PushJobResponse(ok=True, matched=0, sent=0, unmatched_reason="unknown city")
+    if req.category not in CATEGORIES:
+        return PushJobResponse(ok=True, matched=0, sent=0, unmatched_reason="unknown category")
+    matched = sum(1 for p in WORKERS.values() if p.city == req.city and req.category in p.categories)
+    if req.preview_only:
+        return PushJobResponse(ok=True, matched=matched, sent=0)
+    sent = await notify_workers(req)
+    return PushJobResponse(ok=True, matched=matched, sent=sent)
+
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", "8000"))
+    server = Server(Config(app=worker_api, host="0.0.0.0", port=port, log_level="info"))
+    asyncio.run(server.serve())
