@@ -18,7 +18,7 @@ logger = logging.getLogger("customer")
 CITIES = ["Москва", "Тверь", "Санкт-Петербург", "Зеленоград"]
 CATEGORIES = ["Вентиляция", "Кондиционирование", "Электрика", "Сантехника"]
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 WORKER_API_URL = os.getenv("WORKER_API_URL", "")
 JOBS_API_TOKEN = os.getenv("JOBS_API_TOKEN", "")
 

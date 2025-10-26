@@ -22,7 +22,7 @@ CITIES: List[str] = ["Москва", "Тверь", "Санкт-Петербур�
 CATEGORIES: List[str] = ["Вентиляция", "Кондиционирование", "Электрика", "Сантехника"]
 
 JOBS_API_TOKEN = os.getenv("JOBS_API_TOKEN", "")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 
 # ---------------------------------
 # Models
