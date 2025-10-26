@@ -122,7 +122,11 @@ async def api_push_job(req:Request, authorization: str | None = Header(default=N
     if not (authorization and authorization.lower().startswith("bearer ") and authorization.split(" ",1)[1].strip()==JOBS_API_TOKEN):
         raise HTTPException(status_code=401, detail="bad api token")
     body=await req.json()
-    job=body["job"]; customer_contact=body.get("customer_contact","")
+    body = await request.json()
+    job = body.get("job") or body
+    job_id = job.get("job_id")
+    city = job.get("city")
+    category = job.get("category"); customer_contact=body.get("customer_contact","")
     # матчинг: по доступности, категории и вхождению города в адрес (просто)
     cat=job["category"]; addr=job["address"].lower()
     sent=0
