@@ -177,4 +177,6 @@ async def webhook(request:Request, secret:str):
     if not isinstance(data,dict) or "update_id" not in data: return {"ok":True}
     await tg_app.process_update(Update.de_json(data, tg_app.bot)); return {"ok":True}
 
-@app.get("/") async def root(): return {"ok":True}
+@app.get("/")
+async def root():
+    return {"ok":True}
