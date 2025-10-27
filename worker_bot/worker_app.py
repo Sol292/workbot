@@ -14,7 +14,7 @@ from uvicorn import Config, Server
 
 from telegram import Update
 from telegram.ext import (
-    Application, ApplicationBuilder, CommandHandler, ContextTypes, filters
+    Application, ApplicationBuilder, CommandHandler, ContextTypes, filters, MessageHandler
 )
 from config_loader import load_catalog
 
@@ -73,6 +73,7 @@ async def tg_initialize_and_start():
     telegram_app.add_handler(CommandHandler("setcity", cmd_setcity))
     telegram_app.add_handler(CommandHandler("setcategories", cmd_setcategories))
     telegram_app.add_handler(CommandHandler("profile", cmd_profile))
+    telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, generic_message_handler))
 
     # В PTB20: отдельно initialize/start (НЕ run_polling!)
     await telegram_app.initialize()
@@ -95,6 +96,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Категории: /setcategories <список через запятую>\n"
         f"Доступные города: {', '.join(CITIES)}\n"
         f"Доступные категории: {', '.join(CATEGORIES)}"
+    )
+
+async def generic_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    text = update.message.text if update.message else "<no text>"
+    logger.info(f"Received message from user_id={user.id}, username={user.username}, text={text}"
     )
 
 async def cmd_setcity(update: Update, context: ContextTypes.DEFAULT_TYPE):
