@@ -1,4 +1,8 @@
+import sys
 import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from config_loader import load_catalog
+
 import asyncio
 import logging
 import httpx
@@ -13,6 +17,9 @@ from telegram.ext import (
 )
 
 from config_loader import load_catalog
+
+from dotenv import load_dotenv
+load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s')
 logger = logging.getLogger("customer")

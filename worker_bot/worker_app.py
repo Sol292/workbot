@@ -1,4 +1,8 @@
+import sys
 import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from config_loader import load_catalog
+
 import asyncio
 import logging
 from typing import Dict, List, Optional, Set
@@ -13,6 +17,9 @@ from telegram.ext import (
 )
 from config_loader import load_catalog
 
+from dotenv import load_dotenv
+load_dotenv()
+
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s')
 logger = logging.getLogger("worker")
 
@@ -21,7 +28,7 @@ CITIES, CATEGORIES = load_catalog()
 
 # ---- ENV ----
 JOBS_API_TOKEN = os.getenv("JOBS_API_TOKEN", "")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+WORKER_BOT_TOKEN = os.getenv("WORKER_BOT_TOKEN", "")
 
 # ---- Models ----
 class Job(BaseModel):
@@ -56,7 +63,7 @@ telegram_app: Optional[Application] = None
 
 async def tg_initialize_and_start():
     global telegram_app
-    telegram_app = ApplicationBuilder().token(BOT_TOKEN).build()
+    telegram_app = ApplicationBuilder().token(WORKER_BOT_TOKEN).build()
 
     # Handlers
     telegram_app.add_handler(CommandHandler("start", cmd_start))
