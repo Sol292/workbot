@@ -66,6 +66,8 @@ async def tg_initialize_and_start():
     global telegram_app
     telegram_app = ApplicationBuilder().token(WORKER_BOT_TOKEN).build()
 
+    await telegram_app.bot.delete_webhook(drop_pending_updates=True)
+
     # Handlers
     telegram_app.add_handler(CommandHandler("start", cmd_start))
     telegram_app.add_handler(CommandHandler("setcity", cmd_setcity))

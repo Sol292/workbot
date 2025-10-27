@@ -40,11 +40,13 @@ class Job(BaseModel):
     description: str
 
 # ---- Telegram embed lifecycle ----
-tg_app: Application | None = None
+telegramm_app: Application | None = None
 
 async def tg_initialize_and_start():
-    global tg_app
-    tg_app = ApplicationBuilder().token(CUSTOMER_BOT_TOKEN).build()
+    global telegram_app
+    telegram_app = ApplicationBuilder().token(CUSTOMER_BOT_TOKEN).build()
+
+    await telegram_app.bot.delete_webhook(drop_pending_updates=True)
 
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
@@ -56,16 +58,16 @@ async def tg_initialize_and_start():
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
-    tg_app.add_handler(conv)
+    telegram_app.add_handler(conv)
 
-    await tg_app.initialize()
-    await tg_app.start()
+    await telegram_app.initialize()
+    await telegram_app.start()
     logger.info("Customer Telegram app started")
 
 async def tg_stop_and_shutdown():
-    if tg_app:
-        await tg_app.stop()
-        await tg_app.shutdown()
+    if telegram_app:
+        await telegram_app.stop()
+        await telegram_app.shutdown()
         logger.info("Customer Telegram app stopped")
 
 # ---- Handlers ----
