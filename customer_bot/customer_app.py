@@ -12,13 +12,14 @@ from telegram.ext import (
     ConversationHandler, ContextTypes, filters
 )
 
+from config_loader import load_catalog
+
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s')
 logger = logging.getLogger("customer")
 
-CITIES = ["Москва", "Тверь", "Санкт-Петербург", "Зеленоград"]
-CATEGORIES = ["Вентиляция", "Кондиционирование", "Электрика", "Сантехника"]
+CITIES, CATEGORIES = load_catalog()
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+CUSTOMER_BOT_TOKEN = os.getenv("CUSTOMER_BOT_TOKEN", "")
 WORKER_API_URL = os.getenv("WORKER_API_URL", "")
 JOBS_API_TOKEN = os.getenv("JOBS_API_TOKEN", "")
 
@@ -30,6 +31,36 @@ class Job(BaseModel):
     title: str
     description: str
 
+# ---- Telegram embed lifecycle ----
+tg_app: Application | None = None
+
+async def tg_initialize_and_start():
+    global tg_app
+    tg_app = ApplicationBuilder().token(CUSTOMER_BOT_TOKEN).build()
+
+    conv = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
+        states={
+            CITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, city_step)],
+            CAT: [MessageHandler(filters.TEXT & ~filters.COMMAND, cat_step)],
+            TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, title_step)],
+            DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, desc_step)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+    tg_app.add_handler(conv)
+
+    await tg_app.initialize()
+    await tg_app.start()
+    logger.info("Customer Telegram app started")
+
+async def tg_stop_and_shutdown():
+    if tg_app:
+        await tg_app.stop()
+        await tg_app.shutdown()
+        logger.info("Customer Telegram app stopped")
+
+# ---- Handlers ----
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = ReplyKeyboardMarkup([[KeyboardButton(c)] for c in CITIES], one_time_keyboard=True, resize_keyboard=True)
     await update.message.reply_text("Город?", reply_markup=kb)
@@ -66,8 +97,8 @@ async def desc_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         async with httpx.AsyncClient(timeout=10) as client:
             r = await client.post(
                 f"{WORKER_API_URL}/api/push-job",
-                headers={"X-API-Token": JOBS_API_TOKEN},
-                json=data.dict(),
+                headers={"X-API-Token": JOBS_API_TOKEN, "Content-Type": "application/json"},
+                json=data.model_dump(),
             )
         if r.status_code == 200:
             payload = r.json()
@@ -76,7 +107,7 @@ async def desc_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Уведомлений: {payload.get('sent', 0)}"
             )
         else:
-            await update.message.reply_text(f"Ошибка отправки: {r.status_code}")
+            await update.message.reply_text(f"Ошибка отправки: {r.status_code} — {r.text[:200]}")
     except Exception as e:
         await update.message.reply_text(f"Не удалось отправить задачу: {e}")
     return ConversationHandler.END
@@ -85,29 +116,16 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Отменено")
     return ConversationHandler.END
 
+# ---- FastAPI ----
 customer_api = FastAPI(title="Customer API")
 
 @customer_api.on_event("startup")
 async def on_startup():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    conv = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
-        states={
-            CITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, city_step)],
-            CAT: [MessageHandler(filters.TEXT & ~filters.COMMAND, cat_step)],
-            TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, title_step)],
-            DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, desc_step)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-    )
-    app.add_handler(conv)
-    customer_api.state.tg_app = app
-    asyncio.create_task(app.run_polling())
+    await tg_initialize_and_start()
 
 @customer_api.on_event("shutdown")
 async def on_shutdown():
-    app: Application = customer_api.state.tg_app
-    await app.stop()
+    await tg_stop_and_shutdown()
 
 @customer_api.get("/api/health")
 async def health():
