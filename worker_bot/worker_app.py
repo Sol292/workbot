@@ -77,7 +77,7 @@ async def tg_initialize_and_start():
 
     # В PTB20: отдельно initialize/start (НЕ run_polling!)
     await telegram_app.initialize()
-    await telegram_app.start()
+    await telegram_app.run_polling()
     logger.info("Telegram app started")
 
 async def tg_stop_and_shutdown():
