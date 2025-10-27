@@ -1,12 +1,15 @@
 import sys
 import os
+from pathlib import Path
+
+# Добавляем корень репо в PYTHONPATH, если нужно
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
 from config_loader import load_catalog
 
 import asyncio
 import logging
-logging.basicConfig(level=logging.DEBUG)
-from typing import Dict, List, Optional, Set
+from typing import Dict, Optional, Set
 
 from fastapi import FastAPI, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
@@ -14,24 +17,28 @@ from uvicorn import Config, Server
 
 from telegram import Update
 from telegram.ext import (
-    Application, ApplicationBuilder, CommandHandler, ContextTypes, filters, MessageHandler
+    ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 )
-from config_loader import load_catalog
 
 from dotenv import load_dotenv
 load_dotenv()
 
+# Логирование
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s')
 logger = logging.getLogger("worker")
 
-# ---- Catalog (общий json) ----
+# --- Каталоги ---
 CITIES, CATEGORIES = load_catalog()
 
-# ---- ENV ----
+# --- Переменные окружения ---
 JOBS_API_TOKEN = os.getenv("JOBS_API_TOKEN", "")
 WORKER_BOT_TOKEN = os.getenv("WORKER_BOT_TOKEN", "")
 
-# ---- Models ----
+if not WORKER_BOT_TOKEN:
+    logger.error("WORKER_BOT_TOKEN is not set")
+    raise RuntimeError("WORKER_BOT_TOKEN not set")
+
+# --- Модели ---
 class Job(BaseModel):
     city: str
     category: str
@@ -54,42 +61,18 @@ class WorkerProfile(BaseModel):
 
 WORKERS: Dict[int, WorkerProfile] = {}
 
-# ---- Auth ----
+# --- Проверка токена API ---
 async def verify_token(x_api_token: str = Header("")):
     if JOBS_API_TOKEN and x_api_token != JOBS_API_TOKEN:
         raise HTTPException(status_code=401, detail="invalid token")
 
-# ---- Telegram embed lifecycle (PTB 20.x) ----
-telegram_app: Optional[Application] = None
+# --- Telegram бот ---
+telegram_app = None  # type: Optional[ApplicationBuilder]
 
-async def tg_initialize_and_start():
-    global telegram_app
-    telegram_app = ApplicationBuilder().token(WORKER_BOT_TOKEN).build()
-
-    await telegram_app.bot.delete_webhook(drop_pending_updates=True)
-
-    # Handlers
-    telegram_app.add_handler(CommandHandler("start", cmd_start))
-    telegram_app.add_handler(CommandHandler("setcity", cmd_setcity))
-    telegram_app.add_handler(CommandHandler("setcategories", cmd_setcategories))
-    telegram_app.add_handler(CommandHandler("profile", cmd_profile))
-    telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, generic_message_handler))
-
-    # В PTB20: отдельно initialize/start (НЕ run_polling!)
-    await telegram_app.initialize()
-    await telegram_app.run_polling()
-    logger.info("Telegram app started")
-
-async def tg_stop_and_shutdown():
-    if telegram_app:
-        await telegram_app.stop()
-        await telegram_app.shutdown()
-        logger.info("Telegram app stopped")
-
-# ---- Handlers ----
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    WORKERS[user.id] = WORKERS.get(user.id, WorkerProfile(user_id=user.id))
+    logger.info(f"Received /start from user_id={user.id}, username={user.username}")
+    WORKERS[user.id] = WorkerProfile(user_id=user.id)
     await update.message.reply_text(
         "Вы зарегистрированы как исполнитель.\n"
         "Город: /setcity <город>\n"
@@ -98,18 +81,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Доступные категории: {', '.join(CATEGORIES)}"
     )
 
-async def generic_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    text = update.message.text if update.message else "<no text>"
-    logger.info(f"Received message from user_id={user.id}, username={user.username}, text={text}"
-    )
-
 async def cmd_setcity(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if not context.args:
+    args = context.args
+    if not args:
         await update.message.reply_text("Укажите город: /setcity Тверь")
         return
-    city = " ".join(context.args)
+    city = " ".join(args).strip()
     if city not in CITIES:
         await update.message.reply_text(f"Неизвестный город. Доступные: {', '.join(CITIES)}")
         return
@@ -120,10 +98,11 @@ async def cmd_setcity(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_setcategories(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if not context.args:
+    args = context.args
+    if not args:
         await update.message.reply_text("Укажите категории: /setcategories Вентиляция, Кондиционирование")
         return
-    raw = " ".join(context.args)
+    raw = " ".join(args)
     chosen = {c.strip() for c in raw.split(",") if c.strip()}
     unknown = chosen - set(CATEGORIES)
     if unknown:
@@ -141,14 +120,16 @@ async def cmd_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Вы ещё не зарегистрированы. Нажмите /start")
         return
     await update.message.reply_text(
-        f"Профиль:\nГород: {p.city or 'не указан'}\nКатегории: {', '.join(sorted(p.categories)) or 'не указаны'}"
+        f"Профиль:\nГород: {p.city or 'не указан'}\n"
+        f"Категории: {', '.join(sorted(p.categories)) if p.categories else 'не указаны'}"
     )
 
-# ---- Notify ----
+async def generic_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    text = update.message.text if update.message else "<no text>"
+    logger.info(f"Received message from user_id={user.id}, username={user.username}, text={text}")
+
 async def notify_workers(job: Job) -> int:
-    if not telegram_app:
-        logger.error("Telegram app not ready")
-        return 0
     matched = [uid for uid, prof in WORKERS.items() if prof.city == job.city and job.category in prof.categories]
     text = (
         f"Новая задача в городе {job.city}\n"
@@ -158,23 +139,35 @@ async def notify_workers(job: Job) -> int:
     sent = 0
     for uid in matched:
         try:
-            await telegram_app.bot.send_message(uid, text)
+            await telegram_app.bot.send_message(chat_id=uid, text=text)
             sent += 1
         except Exception as e:
-            logger.warning(f"send to {uid} failed: {e}")
+            logger.warning(f"Failed to send to {uid}: {e}")
     return sent
 
-# ---- FastAPI ----
+# --- FastAPI приложение ---
 worker_api = FastAPI(title="Worker API")
 
 @worker_api.on_event("startup")
 async def on_startup():
-    # Стартуем Telegram корректно для PTB20
-    await tg_initialize_and_start()
+    global telegram_app
+    telegram_app = ApplicationBuilder().token(WORKER_BOT_TOKEN).build()
+    telegram_app.add_handler(CommandHandler("start", cmd_start))
+    telegram_app.add_handler(CommandHandler("setcity", cmd_setcity))
+    telegram_app.add_handler(CommandHandler("setcategories", cmd_setcategories))
+    telegram_app.add_handler(CommandHandler("profile", cmd_profile))
+    telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, generic_message_handler))
+
+    await telegram_app.initialize()
+    await telegram_app.start()
+    logger.info("Telegram app started (startup)")
 
 @worker_api.on_event("shutdown")
 async def on_shutdown():
-    await tg_stop_and_shutdown()
+    if telegram_app:
+        await telegram_app.stop()
+        await telegram_app.shutdown()
+        logger.info("Telegram app stopped (shutdown)")
 
 @worker_api.get("/api/health")
 async def health():
@@ -182,8 +175,12 @@ async def health():
 
 @worker_api.get("/api/debug/workers")
 async def debug_workers():
-    return {"count": len(WORKERS), "items": [p.model_dump() for p in WORKERS.values()],
-            "cities": CITIES, "categories": CATEGORIES}
+    return {
+        "count": len(WORKERS),
+        "items": [p.model_dump() for p in WORKERS.values()],
+        "cities": CITIES,
+        "categories": CATEGORIES
+    }
 
 @worker_api.post("/api/push-job", dependencies=[Depends(verify_token)])
 async def push_job(req: PushJobRequest) -> PushJobResponse:
@@ -199,5 +196,6 @@ async def push_job(req: PushJobRequest) -> PushJobResponse:
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8000"))
-    server = Server(Config(app=worker_api, host="0.0.0.0", port=port, log_level="info"))
+    config = Config(app=worker_api, host="0.0.0.0", port=port, log_level="info")
+    server = Server(config)
     asyncio.run(server.serve())
