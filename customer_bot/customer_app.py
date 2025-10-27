@@ -5,6 +5,7 @@ from config_loader import load_catalog
 
 import asyncio
 import logging
+logging.basicConfig(level=logging.DEBUG)
 import httpx
 from fastapi import FastAPI
 from pydantic import BaseModel

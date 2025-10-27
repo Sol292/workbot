@@ -5,6 +5,7 @@ from config_loader import load_catalog
 
 import asyncio
 import logging
+logging.basicConfig(level=logging.DEBUG)
 from typing import Dict, List, Optional, Set
 
 from fastapi import FastAPI, Depends, Header, HTTPException
